@@ -22,6 +22,9 @@ import {
   EmbeddingsClient,
   type EmbeddingsStatus,
 } from "@/lib/embeddings/client";
+import { GraphView } from "./graph-view";
+
+type ViewMode = "reading" | "graph";
 
 type LoadPhase =
   | { kind: "idle" }
@@ -36,6 +39,7 @@ export default function SynapseApp() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeId, setActiveId] = useState<NoteId | null>(null);
   const [neighbors, setNeighbors] = useState<RankedNeighbor[]>([]);
+  const [viewMode, setViewMode] = useState<ViewMode>("reading");
   const engineRef = useRef<BrainEngine | null>(null);
   const embeddingsRef = useRef<EmbeddingsClient | null>(null);
 
@@ -116,16 +120,98 @@ export default function SynapseApp() {
     [notes, activeId],
   );
 
+  // Edges are computed from the engine once notes load. Must be declared
+  // before the early return for LoadingScreen to respect rules of hooks.
+  const edges = useMemo(() => {
+    return engineRef.current?.listEdges() ?? [];
+  }, [notes]);
+
   if (phase.kind !== "ready") {
     return <LoadingScreen phase={phase} />;
   }
 
+  const handleSelectFromGraph = (id: NoteId) => {
+    setActiveId(id);
+    setViewMode("reading");
+  };
+
   return (
     <div className="flex h-screen bg-[#1e1e1e] text-[#dcdcdc] font-sans">
       <Sidebar notes={notes} activeId={activeId} onSelect={setActiveId} />
-      <Viewer note={activeNote} onWikiClick={setActiveId} notes={notes} />
+      <div className="flex-1 flex flex-col min-w-0">
+        <Toolbar
+          viewMode={viewMode}
+          onChange={setViewMode}
+          title={activeNote?.title ?? ""}
+        />
+        {viewMode === "reading" ? (
+          <Viewer note={activeNote} onWikiClick={setActiveId} notes={notes} />
+        ) : (
+          <GraphView
+            notes={notes}
+            edges={edges}
+            activeId={activeId}
+            onSelect={handleSelectFromGraph}
+          />
+        )}
+      </div>
       <BrainPanel neighbors={neighbors} onSelect={setActiveId} />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar: reading / graph toggle + active note title.
+// ---------------------------------------------------------------------------
+
+function Toolbar({
+  viewMode,
+  onChange,
+  title,
+}: {
+  viewMode: ViewMode;
+  onChange: (m: ViewMode) => void;
+  title: string;
+}) {
+  return (
+    <div className="h-10 shrink-0 flex items-center justify-between px-4 border-b border-[#2a2a2a] bg-[#181818]">
+      <div className="text-xs text-[#777] truncate">{title}</div>
+      <div className="flex items-center gap-1 bg-[#1f1f1f] border border-[#2a2a2a] rounded-md p-0.5">
+        <ToolbarButton
+          active={viewMode === "reading"}
+          onClick={() => onChange("reading")}
+          label="Reading"
+        />
+        <ToolbarButton
+          active={viewMode === "graph"}
+          onClick={() => onChange("graph")}
+          label="Graph"
+        />
+      </div>
+    </div>
+  );
+}
+
+function ToolbarButton({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-1 text-[11px] rounded-sm transition-colors ${
+        active
+          ? "bg-[#2d2d2d] text-white"
+          : "text-[#888] hover:text-[#ccc]"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 

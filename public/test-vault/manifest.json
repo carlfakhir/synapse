@@ -1,12 +1,10 @@
 {
   "name": "Synapse Test Vault",
-  "description": "A synthetic vault of 12 interconnected notes across three semantic clusters (security, AI/ML, knowledge) used to demonstrate brain-inspired associative recall.",
+  "description": "A synthetic vault of 10 interconnected notes across two semantic clusters (AI/ML, knowledge) plus a trust/security anchor, used to demonstrate brain-inspired associative recall.",
   "files": [
     "associative-memory.md",
-    "attestation.md",
     "confidential-computing.md",
     "embeddings.md",
-    "gpu-security.md",
     "llms.md",
     "semantic-similarity.md",
     "spaced-repetition.md",
