@@ -176,6 +176,34 @@ export class BrainEngine {
     return [...this.notes.values()];
   }
 
+  /**
+   * Flat list of all (deduped, undirected) edges for graph visualization.
+   * Each pair of connected notes shows up once, tagged with its kind.
+   * If a pair has both a wiki and a semantic edge, wiki wins for display.
+   */
+  listEdges(): Array<{
+    source: NoteId;
+    target: NoteId;
+    weight: number;
+    kind: "wiki" | "semantic";
+  }> {
+    type E = { source: NoteId; target: NoteId; weight: number; kind: "wiki" | "semantic" };
+    const byKey = new Map<string, E>();
+    for (const [source, edges] of this.edges) {
+      for (const e of edges) {
+        const [a, b] = source < e.target ? [source, e.target] : [e.target, source];
+        const key = `${a}|${b}`;
+        const existing = byKey.get(key);
+        if (!existing) {
+          byKey.set(key, { source: a, target: b, weight: e.weight, kind: e.kind });
+        } else if (e.kind === "wiki" && existing.kind !== "wiki") {
+          byKey.set(key, { source: a, target: b, weight: e.weight, kind: "wiki" });
+        }
+      }
+    }
+    return [...byKey.values()];
+  }
+
   /** Serialize learned state for IndexedDB persistence. */
   snapshot(): BrainEngineSnapshot {
     return {
