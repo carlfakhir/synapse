@@ -2,7 +2,7 @@
 // Loads ~25MB of weights on first use, cached thereafter by the browser.
 // The main thread posts { id, text } jobs and receives { id, vector } results.
 
-import { pipeline, env, type FeatureExtractionPipeline } from "@xenova/transformers";
+import { pipeline, env, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
 // Allow the browser to fetch + cache weights from the CDN.
 env.allowLocalModels = false;
