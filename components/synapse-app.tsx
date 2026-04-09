@@ -7,7 +7,15 @@
 // Kept as a single file for readability during v0. Split later if
 // it grows — the engine itself is already isolated in lib/engine/.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type InputHTMLAttributes,
+  type RefObject,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -16,12 +24,29 @@ import {
   type NoteId,
   type RankedNeighbor,
 } from "@/lib/engine";
-import { parseVault, markdownToEmbeddingText } from "@/lib/vault/parser";
+import {
+  parseVault,
+  markdownToEmbeddingText,
+  type RawFile,
+} from "@/lib/vault/parser";
 import { loadVault } from "@/lib/vault/loader";
 import {
   EmbeddingsClient,
   type EmbeddingsStatus,
 } from "@/lib/embeddings/client";
+import {
+  chooseVaultSource,
+  normalizeImportedMarkdownFiles,
+  type ImportedVaultFile,
+  type VaultSource,
+} from "@/lib/imported-vault";
+import {
+  clearImportedVaultFiles,
+  loadImportedVaultFiles,
+  loadStoredVaultSource,
+  saveImportedVaultFiles,
+  saveStoredVaultSource,
+} from "@/lib/imported-vault-storage";
 import { GraphView } from "./graph-view";
 
 type ViewMode = "reading" | "graph";
@@ -34,28 +59,109 @@ type LoadPhase =
   | { kind: "ready" }
   | { kind: "error"; message: string };
 
+const DIRECTORY_PICKER_PROPS: InputHTMLAttributes<HTMLInputElement> & {
+  webkitdirectory?: string;
+  directory?: string;
+} = {
+  webkitdirectory: "",
+  directory: "",
+};
+
 export default function SynapseApp() {
   const [phase, setPhase] = useState<LoadPhase>({ kind: "idle" });
+  const [demoFiles, setDemoFiles] = useState<RawFile[]>([]);
+  const [importedFiles, setImportedFiles] = useState<ImportedVaultFile[]>([]);
+  const [vaultSource, setVaultSource] = useState<VaultSource>("demo");
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeId, setActiveId] = useState<NoteId | null>(null);
   const [neighbors, setNeighbors] = useState<RankedNeighbor[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("reading");
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
+  const [vaultError, setVaultError] = useState<string | null>(null);
   const engineRef = useRef<BrainEngine | null>(null);
   const embeddingsRef = useRef<EmbeddingsClient | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const directoryInputRef = useRef<HTMLInputElement | null>(null);
+
+  const buildHydratedNotes = async (files: Array<RawFile | ImportedVaultFile>) => {
+    const resolvedSource =
+      files.length > 0 ? files : [];
+    const parsed = parseVault(resolvedSource);
+
+    setPhase({ kind: "embedding", done: 0, total: parsed.length });
+    for (let i = 0; i < parsed.length; i++) {
+      const text = markdownToEmbeddingText(parsed[i].content);
+      parsed[i].embedding = await embeddingsRef.current!.embed(text);
+      setPhase({ kind: "embedding", done: i + 1, total: parsed.length });
+    }
+
+    return parsed;
+  };
+
+  const applyHydratedNotes = ({
+    nextSource,
+    parsed,
+    preferredActiveId,
+  }: {
+    nextSource: VaultSource;
+    parsed: Note[];
+    preferredActiveId?: NoteId | null;
+  }) => {
+    const engine = new BrainEngine();
+    engine.ingest(parsed);
+    engineRef.current = engine;
+    setNotes(parsed);
+    setVaultSource(nextSource);
+    setActiveId(
+      preferredActiveId && parsed.some((note) => note.id === preferredActiveId)
+        ? preferredActiveId
+        : parsed[0]?.id ?? null,
+    );
+    setViewMode("reading");
+    setPhase({ kind: "ready" });
+  };
+
+  const hydrateVault = async ({
+    nextSource,
+    nextDemoFiles,
+    nextImportedFiles,
+    preferredActiveId,
+  }: {
+    nextSource: VaultSource;
+    nextDemoFiles: RawFile[];
+    nextImportedFiles: ImportedVaultFile[];
+    preferredActiveId?: NoteId | null;
+  }) => {
+    const resolvedSource =
+      nextImportedFiles.length > 0 ? nextSource : ("demo" as VaultSource);
+    const activeFiles =
+      resolvedSource === "imported" ? nextImportedFiles : nextDemoFiles;
+    const parsed = await buildHydratedNotes(activeFiles);
+
+    applyHydratedNotes({
+      nextSource: resolvedSource,
+      parsed,
+      preferredActiveId,
+    });
+  };
 
   // One-time bootstrap: load vault, embed, ingest.
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe = () => {};
 
     async function boot() {
       setPhase({ kind: "loading-vault" });
-      const { files } = await loadVault("/test-vault");
-      const parsed = parseVault(files);
+      const [{ files }, persistedImportedFiles, storedSource] = await Promise.all([
+        loadVault("/test-vault"),
+        loadImportedVaultFiles(),
+        loadStoredVaultSource(),
+      ]);
       if (cancelled) return;
 
       const embeddings = new EmbeddingsClient();
       embeddingsRef.current = embeddings;
-      const unsubscribe = embeddings.onStatus((s: EmbeddingsStatus) => {
+      unsubscribe = embeddings.onStatus((s: EmbeddingsStatus) => {
         if (s.kind === "loading") {
           setPhase({ kind: "loading-model", stage: s.stage, pct: s.pct });
         } else if (s.kind === "error") {
@@ -63,36 +169,47 @@ export default function SynapseApp() {
         }
       });
       embeddings.start();
+      const initialSource =
+        storedSource && persistedImportedFiles.length > 0
+          ? storedSource
+          : chooseVaultSource(persistedImportedFiles);
 
-      // Embed each note's plaintext in sequence — MiniLM in-browser is
-      // fast but batching is a later optimization.
-      setPhase({ kind: "embedding", done: 0, total: parsed.length });
-      for (let i = 0; i < parsed.length; i++) {
-        const text = markdownToEmbeddingText(parsed[i].content);
-        try {
-          const vec = await embeddings.embed(text);
-          parsed[i].embedding = vec;
-        } catch (err) {
-          setPhase({
-            kind: "error",
-            message: err instanceof Error ? err.message : String(err),
+      setDemoFiles(files);
+      setImportedFiles(persistedImportedFiles);
+      setVaultNotice(
+        persistedImportedFiles.length > 0
+          ? `Loaded ${persistedImportedFiles.length} imported markdown file${
+              persistedImportedFiles.length === 1 ? "" : "s"
+            } from this browser.`
+          : "Viewing bundled demo data. Import your own markdown files to make this your vault.",
+      );
+
+      try {
+        await hydrateVault({
+          nextSource: initialSource,
+          nextDemoFiles: files,
+          nextImportedFiles: persistedImportedFiles,
+        });
+      } catch (err) {
+        if (initialSource === "imported" && persistedImportedFiles.length > 0) {
+          setVaultError(
+            "Imported vault failed to load. Falling back to bundled demo data.",
+          );
+          setVaultNotice("Viewing bundled demo data.");
+          await saveStoredVaultSource("demo");
+          await hydrateVault({
+            nextSource: "demo",
+            nextDemoFiles: files,
+            nextImportedFiles: [],
           });
           return;
         }
-        if (cancelled) return;
-        setPhase({ kind: "embedding", done: i + 1, total: parsed.length });
+
+        setPhase({
+          kind: "error",
+          message: err instanceof Error ? err.message : String(err),
+        });
       }
-
-      const engine = new BrainEngine();
-      engine.ingest(parsed);
-      engineRef.current = engine;
-      setNotes(parsed);
-      setActiveId(parsed[0]?.id ?? null);
-      setPhase({ kind: "ready" });
-
-      return () => {
-        unsubscribe();
-      };
     }
 
     boot().catch((err) => {
@@ -104,6 +221,7 @@ export default function SynapseApp() {
 
     return () => {
       cancelled = true;
+      unsubscribe();
       embeddingsRef.current?.terminate();
     };
   }, []);
@@ -135,9 +253,128 @@ export default function SynapseApp() {
     setViewMode("reading");
   };
 
+  const handleOpenImporter = () => {
+    setVaultError(null);
+    fileInputRef.current?.click();
+  };
+
+  const handleOpenDirectoryImporter = () => {
+    setVaultError(null);
+    directoryInputRef.current?.click();
+  };
+
+  const handleImportFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const { files } = event.target;
+    event.target.value = "";
+    if (!files || files.length === 0) return;
+
+    setVaultError(null);
+    setVaultNotice("Importing markdown files into this browser...");
+
+    try {
+      const uploads = await Promise.all(
+        Array.from(files).map(async (file) => ({
+          name: file.name,
+          content: await file.text(),
+          webkitRelativePath: (
+            file as File & { webkitRelativePath?: string }
+          ).webkitRelativePath,
+        })),
+      );
+      const normalizedFiles = normalizeImportedMarkdownFiles(uploads);
+      if (normalizedFiles.length === 0) {
+        setVaultError("No markdown files found in that selection.");
+        setVaultNotice(null);
+        return;
+      }
+
+      await hydrateVault({
+        nextSource: "imported",
+        nextDemoFiles: demoFiles,
+        nextImportedFiles: normalizedFiles,
+      });
+      const filesSaved = await saveImportedVaultFiles(normalizedFiles);
+      const sourceSaved = await saveStoredVaultSource("imported");
+      setImportedFiles(normalizedFiles);
+      setVaultNotice(filesSaved && sourceSaved
+        ? `Imported ${normalizedFiles.length} markdown file${
+            normalizedFiles.length === 1 ? "" : "s"
+          }. They are stored locally in this browser.`
+        : `Imported ${normalizedFiles.length} markdown file${
+            normalizedFiles.length === 1 ? "" : "s"
+          } for this session, but browser persistence is unavailable.`);
+    } catch (err) {
+      setPhase({ kind: "ready" });
+      setVaultError(
+        err instanceof Error ? err.message : "Failed to import markdown files.",
+      );
+      setVaultNotice(null);
+    }
+  };
+
+  const handleSwitchVault = async (nextSource: VaultSource) => {
+    const resolvedSource =
+      importedFiles.length > 0 ? nextSource : ("demo" as VaultSource);
+    try {
+      await hydrateVault({
+        nextSource: resolvedSource,
+        nextDemoFiles: demoFiles,
+        nextImportedFiles: importedFiles,
+        preferredActiveId: null,
+      });
+      const sourceSaved = await saveStoredVaultSource(resolvedSource);
+      setVaultError(null);
+      setVaultNotice(
+        !sourceSaved
+          ? "Switched vaults for this session, but browser persistence is unavailable."
+          : resolvedSource === "imported"
+          ? "Using your imported vault."
+          : "Viewing bundled demo data.",
+      );
+    } catch (err) {
+      setPhase({ kind: "ready" });
+      setVaultError(
+        err instanceof Error ? err.message : "Failed to switch vaults.",
+      );
+    }
+  };
+
+  const handleClearImportedVault = async () => {
+    const cleared = await clearImportedVaultFiles();
+    const sourceSaved = await saveStoredVaultSource("demo");
+    setImportedFiles([]);
+    setVaultError(null);
+    setVaultNotice(
+      cleared && sourceSaved
+        ? "Cleared the imported vault from this browser."
+        : "Cleared the imported vault for this session, but browser persistence is unavailable.",
+    );
+    await hydrateVault({
+      nextSource: "demo",
+      nextDemoFiles: demoFiles,
+      nextImportedFiles: [],
+      preferredActiveId: null,
+    });
+  };
+
   return (
     <div className="flex h-screen bg-[#1e1e1e] text-[#dcdcdc] font-sans">
-      <Sidebar notes={notes} activeId={activeId} onSelect={setActiveId} />
+      <Sidebar
+        notes={notes}
+        activeId={activeId}
+        activeSource={vaultSource}
+        hasImportedVault={importedFiles.length > 0}
+        vaultNotice={vaultNotice}
+        vaultError={vaultError}
+        fileInputRef={fileInputRef}
+        directoryInputRef={directoryInputRef}
+        onSelect={setActiveId}
+        onImportClick={handleOpenImporter}
+        onImportDirectoryClick={handleOpenDirectoryImporter}
+        onImportFiles={handleImportFiles}
+        onSwitchSource={handleSwitchVault}
+        onClearImportedVault={handleClearImportedVault}
+      />
       <div className="flex-1 flex flex-col min-w-0">
         <Toolbar
           viewMode={viewMode}
@@ -222,34 +459,166 @@ function ToolbarButton({
 function Sidebar({
   notes,
   activeId,
+  activeSource,
+  hasImportedVault,
+  vaultNotice,
+  vaultError,
+  fileInputRef,
+  directoryInputRef,
   onSelect,
+  onImportClick,
+  onImportDirectoryClick,
+  onImportFiles,
+  onSwitchSource,
+  onClearImportedVault,
 }: {
   notes: Note[];
   activeId: NoteId | null;
+  activeSource: VaultSource;
+  hasImportedVault: boolean;
+  vaultNotice: string | null;
+  vaultError: string | null;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  directoryInputRef: RefObject<HTMLInputElement | null>;
   onSelect: (id: NoteId) => void;
+  onImportClick: () => void;
+  onImportDirectoryClick: () => void;
+  onImportFiles: (event: ChangeEvent<HTMLInputElement>) => void;
+  onSwitchSource: (source: VaultSource) => void;
+  onClearImportedVault: () => void;
 }) {
   return (
-    <aside className="w-60 shrink-0 border-r border-[#2a2a2a] bg-[#1a1a1a] overflow-y-auto">
+    <aside className="w-72 shrink-0 border-r border-[#2a2a2a] bg-[#1a1a1a] overflow-y-auto">
       <div className="px-4 py-3 border-b border-[#2a2a2a]">
-        <div className="text-xs uppercase tracking-wider text-[#888]">
-          Vault
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-[#888]">
+              Vault
+            </div>
+            <div className="mt-1 flex items-center gap-2">
+              <div className="text-sm font-medium">
+                {activeSource === "imported" && hasImportedVault
+                  ? "Your Vault"
+                  : "Demo Vault"}
+              </div>
+              <span
+                className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${
+                  activeSource === "imported" && hasImportedVault
+                    ? "border-[#1e5f4a] bg-[#11352c] text-[#8be0b8]"
+                    : "border-[#5a4c2f] bg-[#322717] text-[#d9b980]"
+                }`}
+              >
+                {activeSource === "imported" && hasImportedVault
+                  ? "Persistent"
+                  : "Sample Data"}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={onImportClick}
+            className="rounded-md border border-[#3a3a3a] bg-[#202020] px-3 py-1.5 text-[11px] font-medium text-[#eee] hover:bg-[#292929]"
+          >
+            Import .md
+          </button>
         </div>
-        <div className="text-sm font-medium mt-1">test-vault</div>
+        <p className="mt-2 text-[11px] leading-relaxed text-[#777]">
+          {hasImportedVault
+            ? "Your imported markdown files are stored locally in this browser. Demo data stays separate."
+            : "These built-in notes are sample data only. Import your own markdown files to build a persistent vault here."}
+        </p>
+        {hasImportedVault ? (
+          <div className="mt-3 flex items-center gap-2">
+            <SourceButton
+              active={activeSource === "imported"}
+              label="Your Vault"
+              onClick={() => onSwitchSource("imported")}
+            />
+            <SourceButton
+              active={activeSource === "demo"}
+              label="Demo Data"
+              onClick={() => onSwitchSource("demo")}
+            />
+            <button
+              onClick={onClearImportedVault}
+              className="ml-auto rounded-md px-2 py-1 text-[11px] text-[#999] hover:bg-[#262626]"
+            >
+              Clear
+            </button>
+          </div>
+        ) : null}
+        <button
+          onClick={onImportDirectoryClick}
+          className="mt-3 rounded-md px-2 py-1 text-[11px] text-[#999] hover:bg-[#262626]"
+        >
+          Import Folder
+        </button>
+        {vaultNotice ? (
+          <div className="mt-2 text-[11px] text-[#8be0b8]">{vaultNotice}</div>
+        ) : null}
+        {vaultError ? (
+          <div className="mt-2 text-[11px] text-[#ff8a8a]">{vaultError}</div>
+        ) : null}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".md,text/markdown"
+          multiple
+          onChange={onImportFiles}
+          className="hidden"
+        />
+        <input
+          ref={directoryInputRef}
+          type="file"
+          accept=".md,text/markdown"
+          multiple
+          onChange={onImportFiles}
+          className="hidden"
+          {...DIRECTORY_PICKER_PROPS}
+        />
       </div>
       <nav className="py-2">
-        {notes.map((n) => (
-          <button
-            key={n.id}
-            onClick={() => onSelect(n.id)}
-            className={`w-full text-left px-4 py-1.5 text-sm hover:bg-[#262626] transition-colors ${
-              activeId === n.id ? "bg-[#2d2d2d] text-white" : "text-[#bbb]"
-            }`}
-          >
-            {n.title}
-          </button>
-        ))}
+        {notes.length === 0 ? (
+          <div className="px-4 py-3 text-sm text-[#666]">
+            No notes loaded for this vault yet.
+          </div>
+        ) : (
+          notes.map((n) => (
+            <button
+              key={n.id}
+              onClick={() => onSelect(n.id)}
+              className={`w-full text-left px-4 py-1.5 text-sm hover:bg-[#262626] transition-colors ${
+                activeId === n.id ? "bg-[#2d2d2d] text-white" : "text-[#bbb]"
+              }`}
+            >
+              {n.title}
+            </button>
+          ))
+        )}
       </nav>
     </aside>
+  );
+}
+
+function SourceButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-md px-2.5 py-1 text-[11px] transition-colors ${
+        active
+          ? "bg-[#2d2d2d] text-white"
+          : "bg-[#202020] text-[#999] hover:bg-[#292929]"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
