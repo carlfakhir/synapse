@@ -12,8 +12,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
-  type InputHTMLAttributes,
   type RefObject,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -36,15 +34,19 @@ import {
 } from "@/lib/embeddings/client";
 import {
   chooseVaultSource,
-  normalizeImportedMarkdownFiles,
+  hasDirectoryReadPermission,
+  readMarkdownFilesFromDirectory,
+  requestDirectoryReadPermission,
+  supportsDirectoryPicker,
+  type DirectoryHandle,
   type ImportedVaultFile,
   type VaultSource,
 } from "@/lib/imported-vault";
 import {
-  clearImportedVaultFiles,
-  loadImportedVaultFiles,
+  clearStoredVaultHandle,
+  loadStoredVaultHandle,
   loadStoredVaultSource,
-  saveImportedVaultFiles,
+  saveStoredVaultHandle,
   saveStoredVaultSource,
 } from "@/lib/imported-vault-storage";
 import { GraphView } from "./graph-view";
@@ -59,19 +61,13 @@ type LoadPhase =
   | { kind: "ready" }
   | { kind: "error"; message: string };
 
-const DIRECTORY_PICKER_PROPS: InputHTMLAttributes<HTMLInputElement> & {
-  webkitdirectory?: string;
-  directory?: string;
-} = {
-  webkitdirectory: "",
-  directory: "",
-};
-
 export default function SynapseApp() {
   const [phase, setPhase] = useState<LoadPhase>({ kind: "idle" });
   const [demoFiles, setDemoFiles] = useState<RawFile[]>([]);
   const [importedFiles, setImportedFiles] = useState<ImportedVaultFile[]>([]);
   const [vaultSource, setVaultSource] = useState<VaultSource>("demo");
+  const [connectedFolderName, setConnectedFolderName] = useState<string | null>(null);
+  const [hasStoredFolder, setHasStoredFolder] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeId, setActiveId] = useState<NoteId | null>(null);
   const [neighbors, setNeighbors] = useState<RankedNeighbor[]>([]);
@@ -80,8 +76,6 @@ export default function SynapseApp() {
   const [vaultError, setVaultError] = useState<string | null>(null);
   const engineRef = useRef<BrainEngine | null>(null);
   const embeddingsRef = useRef<EmbeddingsClient | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const directoryInputRef = useRef<HTMLInputElement | null>(null);
 
   const buildHydratedNotes = async (files: Array<RawFile | ImportedVaultFile>) => {
     const resolvedSource =
@@ -152,9 +146,9 @@ export default function SynapseApp() {
 
     async function boot() {
       setPhase({ kind: "loading-vault" });
-      const [{ files }, persistedImportedFiles, storedSource] = await Promise.all([
+      const [{ files }, storedHandle, storedSource] = await Promise.all([
         loadVault("/test-vault"),
-        loadImportedVaultFiles(),
+        loadStoredVaultHandle<DirectoryHandle>(),
         loadStoredVaultSource(),
       ]);
       if (cancelled) return;
@@ -169,20 +163,47 @@ export default function SynapseApp() {
         }
       });
       embeddings.start();
-      const initialSource =
-        storedSource && persistedImportedFiles.length > 0
-          ? storedSource
-          : chooseVaultSource(persistedImportedFiles);
-
       setDemoFiles(files);
+      let persistedImportedFiles: ImportedVaultFile[] = [];
+      let initialSource: VaultSource = "demo";
+      setHasStoredFolder(Boolean(storedHandle));
+
+      if (storedHandle) {
+        setConnectedFolderName(storedHandle.name ?? "Connected folder");
+        try {
+          if (await hasDirectoryReadPermission(storedHandle)) {
+            persistedImportedFiles = await readMarkdownFilesFromDirectory(storedHandle);
+            initialSource =
+              storedSource && persistedImportedFiles.length > 0
+                ? storedSource
+                : chooseVaultSource(persistedImportedFiles.length > 0);
+            setVaultNotice(
+              persistedImportedFiles.length > 0
+                ? `Connected to ${storedHandle.name}.`
+                : "Connected folder does not contain markdown notes yet.",
+            );
+          } else {
+            setVaultNotice(
+              "Folder access needs to be reconnected before Synapse can read your local vault.",
+            );
+          }
+        } catch {
+          persistedImportedFiles = [];
+          initialSource = "demo";
+          setVaultError(
+            "Connected folder could not be read. Falling back to bundled demo data.",
+          );
+          setVaultNotice(
+            "Reconnect the folder or disconnect it to clear the stale local-vault link.",
+          );
+        }
+      } else {
+        setVaultNotice(
+          "Viewing bundled demo data. Connect a local markdown folder to make this your vault.",
+        );
+      }
+
       setImportedFiles(persistedImportedFiles);
-      setVaultNotice(
-        persistedImportedFiles.length > 0
-          ? `Loaded ${persistedImportedFiles.length} imported markdown file${
-              persistedImportedFiles.length === 1 ? "" : "s"
-            } from this browser.`
-          : "Viewing bundled demo data. Import your own markdown files to make this your vault.",
-      );
 
       try {
         await hydrateVault({
@@ -193,7 +214,7 @@ export default function SynapseApp() {
       } catch (err) {
         if (initialSource === "imported" && persistedImportedFiles.length > 0) {
           setVaultError(
-            "Imported vault failed to load. Falling back to bundled demo data.",
+            "Connected folder failed to load. Falling back to bundled demo data.",
           );
           setVaultNotice("Viewing bundled demo data.");
           await saveStoredVaultSource("demo");
@@ -237,6 +258,8 @@ export default function SynapseApp() {
     () => notes.find((n) => n.id === activeId) ?? null,
     [notes, activeId],
   );
+  const hasLocalVaultConnection =
+    importedFiles.length > 0 || hasStoredFolder || connectedFolderName !== null;
 
   // Edges are computed from the engine once notes load. Must be declared
   // before the early return for LoadingScreen to respect rules of hooks.
@@ -253,37 +276,30 @@ export default function SynapseApp() {
     setViewMode("reading");
   };
 
-  const handleOpenImporter = () => {
+  const handleConnectFolder = async () => {
     setVaultError(null);
-    fileInputRef.current?.click();
-  };
-
-  const handleOpenDirectoryImporter = () => {
-    setVaultError(null);
-    directoryInputRef.current?.click();
-  };
-
-  const handleImportFiles = async (event: ChangeEvent<HTMLInputElement>) => {
-    const { files } = event.target;
-    event.target.value = "";
-    if (!files || files.length === 0) return;
-
-    setVaultError(null);
-    setVaultNotice("Importing markdown files into this browser...");
+    setVaultNotice("Connecting local markdown folder...");
 
     try {
-      const uploads = await Promise.all(
-        Array.from(files).map(async (file) => ({
-          name: file.name,
-          content: await file.text(),
-          webkitRelativePath: (
-            file as File & { webkitRelativePath?: string }
-          ).webkitRelativePath,
-        })),
-      );
-      const normalizedFiles = normalizeImportedMarkdownFiles(uploads);
-      if (normalizedFiles.length === 0) {
-        setVaultError("No markdown files found in that selection.");
+      const pickerWindow = window as Window & {
+        showDirectoryPicker?: () => Promise<DirectoryHandle>;
+      };
+      if (!supportsDirectoryPicker(pickerWindow)) {
+        setVaultError("This browser does not support local folder access.");
+        setVaultNotice(null);
+        return;
+      }
+      const handle = await pickerWindow.showDirectoryPicker();
+      const permissionGranted = await requestDirectoryReadPermission(handle);
+      if (!permissionGranted) {
+        setVaultError("Folder access was not granted.");
+        setVaultNotice(null);
+        return;
+      }
+
+      const nextImportedFiles = await readMarkdownFilesFromDirectory(handle);
+      if (nextImportedFiles.length === 0) {
+        setVaultError("No markdown files found in that folder.");
         setVaultNotice(null);
         return;
       }
@@ -291,22 +307,22 @@ export default function SynapseApp() {
       await hydrateVault({
         nextSource: "imported",
         nextDemoFiles: demoFiles,
-        nextImportedFiles: normalizedFiles,
+        nextImportedFiles,
       });
-      const filesSaved = await saveImportedVaultFiles(normalizedFiles);
+      const handleSaved = await saveStoredVaultHandle(handle);
       const sourceSaved = await saveStoredVaultSource("imported");
-      setImportedFiles(normalizedFiles);
-      setVaultNotice(filesSaved && sourceSaved
-        ? `Imported ${normalizedFiles.length} markdown file${
-            normalizedFiles.length === 1 ? "" : "s"
-          }. They are stored locally in this browser.`
-        : `Imported ${normalizedFiles.length} markdown file${
-            normalizedFiles.length === 1 ? "" : "s"
-          } for this session, but browser persistence is unavailable.`);
+      setImportedFiles(nextImportedFiles);
+      setConnectedFolderName(handle.name);
+      setHasStoredFolder(handleSaved);
+      setVaultNotice(
+        handleSaved && sourceSaved
+          ? `Connected ${handle.name}. Synapse will reuse this local folder when the browser allows it.`
+          : `Connected ${handle.name} for this session, but the browser did not persist the folder handle.`,
+      );
     } catch (err) {
       setPhase({ kind: "ready" });
       setVaultError(
-        err instanceof Error ? err.message : "Failed to import markdown files.",
+        err instanceof Error ? err.message : "Failed to connect folder.",
       );
       setVaultNotice(null);
     }
@@ -340,14 +356,16 @@ export default function SynapseApp() {
   };
 
   const handleClearImportedVault = async () => {
-    const cleared = await clearImportedVaultFiles();
+    const cleared = await clearStoredVaultHandle();
     const sourceSaved = await saveStoredVaultSource("demo");
     setImportedFiles([]);
+    setConnectedFolderName(null);
+    setHasStoredFolder(false);
     setVaultError(null);
     setVaultNotice(
       cleared && sourceSaved
-        ? "Cleared the imported vault from this browser."
-        : "Cleared the imported vault for this session, but browser persistence is unavailable.",
+        ? "Disconnected the local vault and returned to bundled demo data."
+        : "Disconnected the local vault for this session, but browser persistence is unavailable.",
     );
     await hydrateVault({
       nextSource: "demo",
@@ -364,14 +382,13 @@ export default function SynapseApp() {
         activeId={activeId}
         activeSource={vaultSource}
         hasImportedVault={importedFiles.length > 0}
+        hasLocalVaultConnection={hasLocalVaultConnection}
+        hasStoredFolder={hasStoredFolder}
+        connectedFolderName={connectedFolderName}
         vaultNotice={vaultNotice}
         vaultError={vaultError}
-        fileInputRef={fileInputRef}
-        directoryInputRef={directoryInputRef}
         onSelect={setActiveId}
-        onImportClick={handleOpenImporter}
-        onImportDirectoryClick={handleOpenDirectoryImporter}
-        onImportFiles={handleImportFiles}
+        onConnectFolder={handleConnectFolder}
         onSwitchSource={handleSwitchVault}
         onClearImportedVault={handleClearImportedVault}
       />
@@ -461,14 +478,13 @@ function Sidebar({
   activeId,
   activeSource,
   hasImportedVault,
+  hasLocalVaultConnection,
+  hasStoredFolder,
+  connectedFolderName,
   vaultNotice,
   vaultError,
-  fileInputRef,
-  directoryInputRef,
   onSelect,
-  onImportClick,
-  onImportDirectoryClick,
-  onImportFiles,
+  onConnectFolder,
   onSwitchSource,
   onClearImportedVault,
 }: {
@@ -476,14 +492,13 @@ function Sidebar({
   activeId: NoteId | null;
   activeSource: VaultSource;
   hasImportedVault: boolean;
+  hasLocalVaultConnection: boolean;
+  hasStoredFolder: boolean;
+  connectedFolderName: string | null;
   vaultNotice: string | null;
   vaultError: string | null;
-  fileInputRef: RefObject<HTMLInputElement | null>;
-  directoryInputRef: RefObject<HTMLInputElement | null>;
   onSelect: (id: NoteId) => void;
-  onImportClick: () => void;
-  onImportDirectoryClick: () => void;
-  onImportFiles: (event: ChangeEvent<HTMLInputElement>) => void;
+  onConnectFolder: () => void;
   onSwitchSource: (source: VaultSource) => void;
   onClearImportedVault: () => void;
 }) {
@@ -498,38 +513,42 @@ function Sidebar({
             <div className="mt-1 flex items-center gap-2">
               <div className="text-sm font-medium">
                 {activeSource === "imported" && hasImportedVault
-                  ? "Your Vault"
+                  ? connectedFolderName || "Your Vault"
                   : "Demo Vault"}
               </div>
               <span
                 className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${
-                  activeSource === "imported" && hasImportedVault
+                  activeSource === "imported" && hasLocalVaultConnection
                     ? "border-[#1e5f4a] bg-[#11352c] text-[#8be0b8]"
                     : "border-[#5a4c2f] bg-[#322717] text-[#d9b980]"
                 }`}
               >
-                {activeSource === "imported" && hasImportedVault
-                  ? "Persistent"
+                {activeSource === "imported" && hasLocalVaultConnection
+                  ? hasStoredFolder
+                    ? "Persistent"
+                    : "Session"
                   : "Sample Data"}
               </span>
             </div>
           </div>
           <button
-            onClick={onImportClick}
+            onClick={onConnectFolder}
             className="rounded-md border border-[#3a3a3a] bg-[#202020] px-3 py-1.5 text-[11px] font-medium text-[#eee] hover:bg-[#292929]"
           >
-            Import .md
+            {hasLocalVaultConnection ? "Reconnect" : "Connect Folder"}
           </button>
         </div>
         <p className="mt-2 text-[11px] leading-relaxed text-[#777]">
-          {hasImportedVault
-            ? "Your imported markdown files are stored locally in this browser. Demo data stays separate."
-            : "These built-in notes are sample data only. Import your own markdown files to build a persistent vault here."}
+          {hasLocalVaultConnection
+            ? hasStoredFolder
+              ? "Synapse is reading markdown from a local folder on this device. Demo data stays separate."
+              : "Synapse is reading a local folder for this session only. Demo data stays separate."
+            : "These built-in notes are sample data only. Connect a local markdown folder to make this your vault."}
         </p>
-        {hasImportedVault ? (
+        {hasLocalVaultConnection ? (
           <div className="mt-3 flex items-center gap-2">
             <SourceButton
-              active={activeSource === "imported"}
+              active={activeSource === "imported" && hasImportedVault}
               label="Your Vault"
               onClick={() => onSwitchSource("imported")}
             />
@@ -542,39 +561,16 @@ function Sidebar({
               onClick={onClearImportedVault}
               className="ml-auto rounded-md px-2 py-1 text-[11px] text-[#999] hover:bg-[#262626]"
             >
-              Clear
+              Disconnect
             </button>
           </div>
         ) : null}
-        <button
-          onClick={onImportDirectoryClick}
-          className="mt-3 rounded-md px-2 py-1 text-[11px] text-[#999] hover:bg-[#262626]"
-        >
-          Import Folder
-        </button>
         {vaultNotice ? (
           <div className="mt-2 text-[11px] text-[#8be0b8]">{vaultNotice}</div>
         ) : null}
         {vaultError ? (
           <div className="mt-2 text-[11px] text-[#ff8a8a]">{vaultError}</div>
         ) : null}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".md,text/markdown"
-          multiple
-          onChange={onImportFiles}
-          className="hidden"
-        />
-        <input
-          ref={directoryInputRef}
-          type="file"
-          accept=".md,text/markdown"
-          multiple
-          onChange={onImportFiles}
-          className="hidden"
-          {...DIRECTORY_PICKER_PROPS}
-        />
       </div>
       <nav className="py-2">
         {notes.length === 0 ? (

@@ -1,10 +1,10 @@
 import { openDB } from "idb";
 
-import type { ImportedVaultFile, VaultSource } from "@/lib/imported-vault";
+import type { StoredDirectoryHandle, VaultSource } from "@/lib/imported-vault";
 
 const DB_NAME = "synapse-vault";
 const STORE_NAME = "app";
-const IMPORTED_FILES_KEY = "imported-files";
+const DIRECTORY_HANDLE_KEY = "directory-handle";
 const ACTIVE_SOURCE_KEY = "active-source";
 
 async function getDb() {
@@ -17,31 +17,31 @@ async function getDb() {
   });
 }
 
-export async function loadImportedVaultFiles(): Promise<ImportedVaultFile[]> {
+export async function loadStoredVaultHandle<T extends StoredDirectoryHandle>(): Promise<T | null> {
   try {
     const db = await getDb();
-    return ((await db.get(STORE_NAME, IMPORTED_FILES_KEY)) as ImportedVaultFile[] | undefined) ?? [];
+    return ((await db.get(STORE_NAME, DIRECTORY_HANDLE_KEY)) as T | undefined) ?? null;
   } catch {
-    return [];
+    return null;
   }
 }
 
-export async function saveImportedVaultFiles(
-  files: ImportedVaultFile[],
+export async function saveStoredVaultHandle(
+  handle: StoredDirectoryHandle,
 ): Promise<boolean> {
   try {
     const db = await getDb();
-    await db.put(STORE_NAME, files, IMPORTED_FILES_KEY);
+    await db.put(STORE_NAME, handle, DIRECTORY_HANDLE_KEY);
     return true;
   } catch {
     return false;
   }
 }
 
-export async function clearImportedVaultFiles(): Promise<boolean> {
+export async function clearStoredVaultHandle(): Promise<boolean> {
   try {
     const db = await getDb();
-    await db.delete(STORE_NAME, IMPORTED_FILES_KEY);
+    await db.delete(STORE_NAME, DIRECTORY_HANDLE_KEY);
     return true;
   } catch {
     return false;
