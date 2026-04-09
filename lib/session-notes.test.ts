@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Note } from "@/lib/engine";
+import type { Note } from "./engine";
 import {
   buildSessionNoteContent,
   createSessionNote,
   slugifySessionTitle,
   validateSessionNoteInput,
-} from "@/lib/session-notes";
+} from "./session-notes";
 
 const SAMPLE_NOTES: Note[] = [
   {
