@@ -1,5 +1,5 @@
-import type { Note } from "@/lib/engine";
-import { parseVault } from "@/lib/vault/parser";
+import type { Note } from "./engine";
+import { parseVault } from "./vault/parser";
 
 export interface SessionNoteInput {
   title: string;
