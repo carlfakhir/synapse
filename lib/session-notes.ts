@@ -6,39 +6,63 @@ export interface SessionNoteInput {
   body: string;
 }
 
-export interface SessionNoteValidation {
-  title: string | null;
-  body: string | null;
-}
+export type SessionNoteValidation =
+  | {
+      ok: true;
+      title: string;
+      body: string;
+    }
+  | {
+      ok: false;
+      message: string;
+    };
 
 export function validateSessionNoteInput(
   input: SessionNoteInput,
 ): SessionNoteValidation {
+  const title = input.title.trim();
+  const body = input.body.trim();
+
+  if (!title) {
+    return { ok: false, message: "Title is required." };
+  }
+
+  if (!body) {
+    return { ok: false, message: "Body is required." };
+  }
+
   return {
-    title: input.title.trim() ? null : "Title is required.",
-    body: input.body.trim() ? null : "Body is required.",
+    ok: true,
+    title,
+    body,
   };
 }
 
 export function slugifySessionTitle(title: string): string {
-  return title
+  const slug = title
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
+
+  return slug || "note";
 }
 
 export function buildSessionNoteContent(title: string, body: string): string {
-  return `# ${title.trim()}\n\n${body.trim()}`;
+  return `# ${title}\n\n${body}`;
 }
 
 export function createSessionNote(
-  existingNotes: Note[],
   input: SessionNoteInput,
+  existingNotes: Note[],
 ): Note {
-  const title = input.title.trim();
-  const body = input.body.trim();
-  const slug = slugifySessionTitle(title) || "note";
+  const validation = validateSessionNoteInput(input);
+  if (!validation.ok) {
+    throw new Error(validation.message);
+  }
+
+  const slug = slugifySessionTitle(validation.title);
   const path = `user/${slug}-${Date.now()}.md`;
   const files = [
     ...existingNotes.map((note) => ({
@@ -47,7 +71,7 @@ export function createSessionNote(
     })),
     {
       path,
-      content: buildSessionNoteContent(title, body),
+      content: buildSessionNoteContent(validation.title, validation.body),
     },
   ];
 
