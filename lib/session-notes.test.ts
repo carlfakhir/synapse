@@ -5,48 +5,55 @@ import {
   createSessionNote,
   slugifySessionTitle,
   validateSessionNoteInput,
-} from "./session-notes";
+} from "@/lib/session-notes";
+
+const SAMPLE_NOTES: Note[] = [
+  {
+    id: "user/original-note-1.md",
+    path: "user/original-note-1.md",
+    title: "Original Note",
+    content: "# Original Note\n\nExisting body",
+    wikiLinks: [],
+  },
+];
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("session note helpers", () => {
-  it("validates required title and body fields", () => {
+  it("rejects an empty title", () => {
     expect(validateSessionNoteInput({ title: "  ", body: "Body" })).toEqual({
-      title: "Title is required.",
-      body: null,
-    });
-
-    expect(validateSessionNoteInput({ title: "Title", body: "   " })).toEqual({
-      title: null,
-      body: "Body is required.",
+      ok: false,
+      message: "Title is required.",
     });
   });
 
-  it("creates a parser-compatible note from existing notes and the new note", () => {
+  it("rejects an empty body", () => {
+    expect(validateSessionNoteInput({ title: "Title", body: "   " })).toEqual({
+      ok: false,
+      message: "Body is required.",
+    });
+  });
+
+  it("builds and parses a session note from sample notes", () => {
     vi.spyOn(Date, "now").mockReturnValue(1700000000000);
 
-    const existingNotes: Note[] = [
-      {
-        id: "user/original-note-1.md",
-        path: "user/original-note-1.md",
-        title: "Original Note",
-        content: "# Original Note\n\nExisting body",
-        wikiLinks: [],
-      },
-    ];
-
     expect(slugifySessionTitle("Session Note")).toBe("session-note");
+    expect(slugifySessionTitle("  Session   -- Note  ")).toBe("session-note");
+    expect(slugifySessionTitle("   ")).toBe("note");
     expect(buildSessionNoteContent("Session Note", "Link to [[original-note-1]]")).toBe(
       "# Session Note\n\nLink to [[original-note-1]]",
     );
 
     expect(
-      createSessionNote(existingNotes, {
-        title: "Session Note",
-        body: "Link to [[original-note-1]]",
-      }),
+      createSessionNote(
+        {
+          title: "Session Note",
+          body: "Link to [[original-note-1]]",
+        },
+        SAMPLE_NOTES,
+      ),
     ).toEqual({
       id: "user/session-note-1700000000000.md",
       path: "user/session-note-1700000000000.md",
@@ -54,5 +61,17 @@ describe("session note helpers", () => {
       content: "# Session Note\n\nLink to [[original-note-1]]",
       wikiLinks: ["user/original-note-1.md"],
     });
+  });
+
+  it("throws on invalid input", () => {
+    expect(() =>
+      createSessionNote(
+        {
+          title: "   ",
+          body: "Body",
+        },
+        SAMPLE_NOTES,
+      ),
+    ).toThrow("Title is required.");
   });
 });
