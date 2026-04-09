@@ -4,19 +4,21 @@
 
 Most note apps treat links as static references. Open a note, see the same backlinks you saw last week. Synapse asks a different question: *what would note-taking feel like if connections worked more like the brain?* Open a note, and a side panel surfaces what your brain is **also** thinking about — based on semantic similarity, spreading activation through the graph, and decay of unused associations over time.
 
-## What makes it different
+## Current capabilities
 
 - **Associative recall, not backlinks.** Opening `Attestation` surfaces `Confidential Computing`, `Zero Trust`, and `GPU Security` — not because they share the word "attestation," but because they're semantically close in vector space.
 - **Spreading activation.** When you focus a note, activation flows outward through the (wiki + semantic) graph, fading with distance. Classic Collins & Loftus spreading activation, bounded to two hops so the whole vault doesn't light up.
 - **Memory strength.** Each note carries a composite score of recency, frequency, graph centrality, and explicit pinning. Recently touched notes feel more "present" in the panel, the way a thought from this morning lingers while one from last month doesn't.
 - **Edge decay.** Semantic associations you never traverse lose weight over time. Notes are never deleted — their connections just fade, matching how unused memory associations weaken in the brain. Explicit wiki links never decay.
 - **100% local.** The embedding model (`all-MiniLM-L6-v2`, ~25MB) runs in a web worker in your browser via `transformers.js`. No API keys, no cloud, no data leaves your machine.
+- **Graph view.** Toggle from reading mode into a force-directed graph of the whole vault with solid wiki edges and dashed semantic edges.
+- **Real local vault connection.** Synapse can connect to a markdown folder on your machine through the browser file system picker, switch between `Your Vault` and `Demo Data`, and reconnect or disconnect the folder later.
 
-## The demo
+## Demo + local vaults
 
 Open `associative-memory.md`. The Associative Recall panel lights up `embeddings`, `semantic-similarity`, `zettelkasten`, `spaced-repetition` — notes that cross cluster boundaries because they share conceptual ground, not tokens. Click one to follow the thought. Activation propagates; decay updates. That's the whole experience.
 
-Synapse ships with a 12-note synthetic test vault in `public/test-vault/` spanning three semantic clusters (security/trust, AI/ML, knowledge) with deliberate cross-cluster connections so the demo works out of the box.
+Synapse ships with a synthetic demo vault in `public/test-vault/` so the app works out of the box. The built-in notes are explicitly labeled as sample data. After that, you can connect your own local markdown folder and browse it with the same reader, graph, and associative recall flow.
 
 ## Architecture
 
@@ -49,13 +51,27 @@ npm run dev
 
 Then open <http://localhost:3000>. First load downloads the embedding model (~25MB, cached thereafter) and indexes the 12-note demo vault. Subsequent loads are instant.
 
-## What's next (not in v0)
+To use your own notes:
 
-- Point it at your own vault via the File System Access API
-- IndexedDB persistence so learned state survives reloads
-- Pin/unpin from the UI
-- Global graph view with activation heatmap
-- Obsidian plugin wrapper that reuses the engine as a dependency
+1. Click `Connect Folder` in the sidebar
+2. Pick a local folder containing markdown files
+3. Switch between `Your Vault` and `Demo Data` as needed
+
+At the moment, folder access depends on browser support for the File System Access API. Chromium-based browsers are the intended path.
+
+## Why this exists
+
+Synapse is less about file management and more about retrieval. The question behind the project is simple: if human memory is associative, weighted, and decaying, why do note apps mostly stop at folders and static backlinks?
+
+This repo is an experiment in making that idea feel tangible in the browser.
+
+## Roadmap
+
+- Better vault re-scan/update flows for changed files
+- Persist learned engine state across sessions
+- Pin/unpin and other note controls in the UI
+- Richer graph overlays (activation heatmaps, filtering, clustering)
+- A desktop wrapper or plugin path if browser file access becomes too limiting
 
 ## License
 
